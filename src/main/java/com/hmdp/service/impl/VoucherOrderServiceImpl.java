@@ -12,9 +12,11 @@ import com.hmdp.service.IVoucherOrderService;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.hmdp.service.IVoucherService;
 import com.hmdp.utils.RedisIdWorker;
+import com.hmdp.utils.SimpleRedisLock;
 import com.hmdp.utils.UserHolder;
 import org.apache.ibatis.javassist.tools.rmi.AppletServer;
 import org.springframework.aop.framework.AopContext;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -38,6 +40,8 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     @Resource
     private RedisIdWorker redisIdWorker;
 
+    @Resource
+    private StringRedisTemplate stringRedisTemplate;
     /**
      * 实现秒杀优惠券功能
      *
@@ -65,14 +69,24 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
             return Result.fail("晚了一步，优惠券被抢光了!");
         }
         Long userId = UserHolder.getUser().getId();
-        //每次用户都是重新获得的，所以需要toString。而toString每次又是new的，还是不一致，所以使用intern常量池中的string
-        //又因为事务提交要在方法结束后才进行，防止锁释放后事务还没提交而其他线程又进入产生问题，所以要在方法外加锁
-        synchronized (userId.toString().intern()) {
+        //获取redis锁
+        SimpleRedisLock lock = new SimpleRedisLock("order:" + userId, stringRedisTemplate);
+        boolean isLock = lock.tryLock(1200);
+        if (!isLock) {
+            //获取失败处理
+            return Result.fail("一个用户只能购买一张该优惠券");
+        }
+        try {
             //获取事务有关的代理对象
             IVoucherOrderService service = (IVoucherOrderService) AopContext.currentProxy();
-
             return service.createVoucherOrder(voucherId);
+        } catch (IllegalStateException e) {
+            throw new RuntimeException(e);
+        } finally {
+            //释放锁
+            lock.unlock();
         }
+
     }
 
     @Transactional
